@@ -208,11 +208,7 @@ pub fn run<W>(
 
 					let mut field_type_name = String::new();
 
-					if !required {
-						write!(field_type_name, "Option<")?;
-					}
-
-					let type_name = get_rust_type(&schema.kind, map_namespace)?;
+					let type_name = get_rust_type(&schema.kind, *required, map_namespace)?;
 
 					if name.0 == "metadata" {
 						metadata_ty = Some((type_name.clone(), *required));
@@ -230,7 +226,12 @@ pub fn run<W>(
 								"io.k8s.apiextensions-apiserver.pkg.apis.apiextensions.v1.JSONSchemaProps",
 								"not",
 								"io.k8s.apiextensions-apiserver.pkg.apis.apiextensions.v1.JSONSchemaProps",
-							) => write!(field_type_name, "Box<{}>", type_name)?,
+							) => {
+								write!(field_type_name, "Box<{}>", type_name)?;
+								if field_type_name.starts_with("Box<Option<") {
+									field_type_name = format!("Option<Box<{}", &field_type_name[("Box<Option<".len())..]);
+								}
+							},
 
 							_ => write!(field_type_name, "{}", type_name)?,
 						}
@@ -238,10 +239,6 @@ pub fn run<W>(
 					else {
 						write!(field_type_name, "{}", type_name)?;
 					};
-
-					if !required {
-						write!(field_type_name, ">")?;
-					}
 
 					let is_flattened = matches!(&schema.kind, swagger20::SchemaKind::Ty(swagger20::Type::CustomResourceSubresources(_)));
 
@@ -472,11 +469,13 @@ pub fn run<W>(
 					path: "io.k8s.apimachinery.pkg.apis.meta.v1.Status".to_owned(),
 					can_be_default: None,
 				}),
+				true,
 				map_namespace,
 			)?;
 
 			let error_other_rust_type = get_rust_type(
 				&swagger20::SchemaKind::Ref(raw_extension_ref_path.clone()),
+				true,
 				map_namespace,
 			)?;
 
@@ -493,7 +492,7 @@ pub fn run<W>(
 		},
 
 		swagger20::SchemaKind::Ty(swagger20::Type::ListDef { metadata }) => {
-			let metadata_rust_type = get_rust_type(metadata, map_namespace)?;
+			let metadata_rust_type = get_rust_type(metadata, true, map_namespace)?;
 
 			let template_generics_where_part = format!("T: {}ListableResource", local);
 			let template_generics = templates::Generics {
@@ -600,7 +599,7 @@ pub fn run<W>(
 		},
 
 		swagger20::SchemaKind::Ty(swagger20::Type::ListRef { items }) => {
-			let item_type_name = get_rust_type(items, map_namespace)?;
+			let item_type_name = get_rust_type(items, true, map_namespace)?;
 			let alias_type_name = format!("{}List<{}>", local, item_type_name);
 
 			templates::type_alias::generate(
@@ -634,14 +633,14 @@ pub fn run<W>(
 				for (name, schema) in properties {
 					let field_name = get_rust_ident(name);
 
-					let type_name = get_rust_borrow_type(&schema.kind, map_namespace)?;
+					let type_name = get_rust_borrow_type(&schema.kind, false, map_namespace)?;
 
 					let field_type_name =
-						if type_name.starts_with('&') {
-							format!("Option<&'a {}>", &type_name[1..])
+						if type_name.starts_with("Option<&") {
+							format!("Option<&'a {}", &type_name[("Option<&".len())..])
 						}
 						else {
-							format!("Option<{}>", type_name)
+							type_name.into_owned()
 						};
 
 					result.push(templates::Property {
@@ -785,7 +784,7 @@ pub fn run<W>(
 		},
 
 		swagger20::SchemaKind::Ty(_) => {
-			let inner_type_name = get_rust_type(&definition.kind, map_namespace)?;
+			let inner_type_name = get_rust_type(&definition.kind, true, map_namespace)?;
 
 			// Kubernetes requires MicroTime to be serialized with exactly six decimal digits, instead of the default serde serialization of `chrono::DateTime`
 			// that uses a variable number up to nine.
@@ -1174,120 +1173,125 @@ pub fn get_rust_ident(name: &str) -> std::borrow::Cow<'static, str> {
 
 fn get_rust_borrow_type(
 	schema_kind: &swagger20::SchemaKind,
+	required: bool,
 	map_namespace: &impl MapNamespace,
 ) -> Result<std::borrow::Cow<'static, str>, Error> {
 	let local = map_namespace_local_to_string(map_namespace)?;
 
 	#[allow(clippy::match_same_arms)]
-	match schema_kind {
-		swagger20::SchemaKind::Properties(_) => Err("Nested anonymous types not supported".into()),
+	match (schema_kind, required) {
+		(swagger20::SchemaKind::Properties(_), true) => Err("Nested anonymous types not supported".into()),
 
-		swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }) if path == "io.k8s.CreateOptional" =>
+		(swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }), true) if path == "io.k8s.CreateOptional" =>
 			Ok(format!("{}CreateOptional<'_>", local).into()),
 
-		swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }) if path == "io.k8s.DeleteOptional" =>
+		(swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }), true) if path == "io.k8s.DeleteOptional" =>
 			Ok(format!("{}DeleteOptional<'_>", local).into()),
 
-		swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }) if path == "io.k8s.ListOptional" =>
+		(swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }), true) if path == "io.k8s.ListOptional" =>
 			Ok(format!("{}ListOptional<'_>", local).into()),
 
-		swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }) if path == "io.k8s.PatchOptional" =>
+		(swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }), true) if path == "io.k8s.PatchOptional" =>
 			Ok(format!("{}PatchOptional<'_>", local).into()),
 
-		swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }) if path == "io.k8s.ReplaceOptional" =>
+		(swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }), true) if path == "io.k8s.ReplaceOptional" =>
 			Ok(format!("{}ReplaceOptional<'_>", local).into()),
 
-		swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }) if path == "io.k8s.WatchOptional" =>
+		(swagger20::SchemaKind::Ref(swagger20::RefPath { path, .. }), true) if path == "io.k8s.WatchOptional" =>
 			Ok(format!("{}WatchOptional<'_>", local).into()),
 
-		swagger20::SchemaKind::Ref(ref_path) =>
+		(swagger20::SchemaKind::Ref(ref_path), true) =>
 			Ok(format!("&{}", get_fully_qualified_type_name(ref_path, map_namespace)).into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Any) => Ok("&serde_json::Value".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Any), true) => Ok("&serde_json::Value".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Array { items }) =>
-			Ok(format!("&[{}]", get_rust_type(&items.kind, map_namespace)?).into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Array { items }), _) =>
+			Ok(format!("&[{}]", get_rust_type(&items.kind, true, map_namespace)?).into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Boolean) => Ok("bool".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Boolean), true) => Ok("bool".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Integer { format: swagger20::IntegerFormat::Int32 }) => Ok("i32".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::Integer { format: swagger20::IntegerFormat::Int64 }) => Ok("i64".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Integer { format: swagger20::IntegerFormat::Int32 }), true) => Ok("i32".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Integer { format: swagger20::IntegerFormat::Int64 }), true) => Ok("i64".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Number { format: swagger20::NumberFormat::Double }) => Ok("f64".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Number { format: swagger20::NumberFormat::Double }), true) => Ok("f64".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Object { additional_properties }) =>
-			Ok(format!("&std::collections::BTreeMap<String, {}>", get_rust_type(&additional_properties.kind, map_namespace)?).into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Object { additional_properties }), _) =>
+			Ok(format!("&std::collections::BTreeMap<String, {}>", get_rust_type(&additional_properties.kind, true, map_namespace)?).into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::String { format: Some(swagger20::StringFormat::Byte) }) =>
-			Ok(format!("&{}", get_rust_type(schema_kind, map_namespace)?).into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::String { format: Some(swagger20::StringFormat::DateTime) }) =>
-			Ok(format!("&{}", get_rust_type(schema_kind, map_namespace)?).into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::String { format: None }) => Ok("&str".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::String { format: Some(swagger20::StringFormat::Byte) }), true) =>
+			Ok(format!("&{}", get_rust_type(schema_kind, true, map_namespace)?).into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::String { format: Some(swagger20::StringFormat::DateTime) }), true) =>
+			Ok(format!("&{}", get_rust_type(schema_kind, true, map_namespace)?).into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::String { format: None }), true) => Ok("&str".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::CustomResourceSubresources(_)) =>
-			Ok(format!("&{}", get_rust_type(schema_kind, map_namespace)?).into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::CustomResourceSubresources(_)), true) =>
+			Ok(format!("&{}", get_rust_type(schema_kind, true, map_namespace)?).into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::IntOrString) => Err("nothing should be trying to refer to IntOrString".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::IntOrString), _) => Err("nothing should be trying to refer to IntOrString".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrArray(_)) |
-		swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrBool(_)) |
-		swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrStringArray(_)) => Err("JSON schema types not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::Patch) => Err("Patch type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::WatchEvent(_)) => Err("WatchEvent type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrArray(_)), _) |
+		(swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrBool(_)), _) |
+		(swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrStringArray(_)), _) => Err("JSON schema types not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Patch), _) => Err("Patch type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::WatchEvent(_)), _) => Err("WatchEvent type not supported".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::ListDef { .. }) => Err("ListDef type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ListRef { .. }) => Ok(format!("&{}", get_rust_type(schema_kind, map_namespace)?).into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ListDef { .. }), _) => Err("ListDef type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ListRef { .. }), _) =>
+			Ok(format!("&{}", get_rust_type(schema_kind, true, map_namespace)?).into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::CreateOptional(_)) => Err("CreateOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::DeleteOptional(_)) => Err("DeleteOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ListOptional(_)) => Err("ListOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::PatchOptional(_)) => Err("PatchOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ReplaceOptional(_)) => Err("ReplaceOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::WatchOptional(_)) => Err("WatchOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::CreateOptional(_)), _) => Err("CreateOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::DeleteOptional(_)), _) => Err("DeleteOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ListOptional(_)), _) => Err("ListOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::PatchOptional(_)), _) => Err("PatchOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ReplaceOptional(_)), _) => Err("ReplaceOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::WatchOptional(_)), _) => Err("WatchOptional type not supported".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::CreateResponse) => Err("CreateResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::DeleteResponse) => Err("DeleteResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ListResponse) => Err("ListResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::PatchResponse) => Err("PatchResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ReplaceResponse) => Err("ReplaceResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::WatchResponse) => Err("WatchResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::CreateResponse), _) => Err("CreateResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::DeleteResponse), _) => Err("DeleteResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ListResponse), _) => Err("ListResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::PatchResponse), _) => Err("PatchResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ReplaceResponse), _) => Err("ReplaceResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::WatchResponse), _) => Err("WatchResponse type not supported".into()),
+
+		(schema_kind, false) => Ok(format!("Option<{}>", get_rust_borrow_type(schema_kind, true, map_namespace)?).into()),
 	}
 }
 
 fn get_rust_type(
 	schema_kind: &swagger20::SchemaKind,
+	required: bool,
 	map_namespace: &impl MapNamespace,
 ) -> Result<std::borrow::Cow<'static, str>, Error> {
 	let local = map_namespace_local_to_string(map_namespace)?;
 
-	match schema_kind {
-		swagger20::SchemaKind::Properties(_) => Err("Nested anonymous types not supported".into()),
+	match (schema_kind, required) {
+		(swagger20::SchemaKind::Properties(_), _) => Err("Nested anonymous types not supported".into()),
 
-		swagger20::SchemaKind::Ref(ref_path) =>
+		(swagger20::SchemaKind::Ref(ref_path), true) =>
 			Ok(get_fully_qualified_type_name(ref_path, map_namespace).into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Any) => Ok("serde_json::Value".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Any), true) => Ok("serde_json::Value".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Array { items }) =>
-			Ok(format!("Vec<{}>", get_rust_type(&items.kind, map_namespace)?).into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Array { items }), _) =>
+			Ok(format!("Vec<{}>", get_rust_type(&items.kind, true, map_namespace)?).into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Boolean) => Ok("bool".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Boolean), true) => Ok("bool".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Integer { format: swagger20::IntegerFormat::Int32 }) => Ok("i32".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::Integer { format: swagger20::IntegerFormat::Int64 }) => Ok("i64".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Integer { format: swagger20::IntegerFormat::Int32 }), true) => Ok("i32".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Integer { format: swagger20::IntegerFormat::Int64 }), true) => Ok("i64".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Number { format: swagger20::NumberFormat::Double }) => Ok("f64".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Number { format: swagger20::NumberFormat::Double }), true) => Ok("f64".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::Object { additional_properties }) =>
-			Ok(format!("std::collections::BTreeMap<String, {}>", get_rust_type(&additional_properties.kind, map_namespace)?).into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Object { additional_properties }), _) =>
+			Ok(format!("std::collections::BTreeMap<String, {}>", get_rust_type(&additional_properties.kind, true, map_namespace)?).into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::String { format: Some(swagger20::StringFormat::Byte) }) =>
+		(swagger20::SchemaKind::Ty(swagger20::Type::String { format: Some(swagger20::StringFormat::Byte) }), true) =>
 			Ok(format!("{}ByteString", local).into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::String { format: Some(swagger20::StringFormat::DateTime) }) =>
+		(swagger20::SchemaKind::Ty(swagger20::Type::String { format: Some(swagger20::StringFormat::DateTime) }), true) =>
 			Ok(format!("{local}chrono::DateTime<{local}chrono::Utc>", local = local).into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::String { format: None }) => Ok("String".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::String { format: None }), true) => Ok("String".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::CustomResourceSubresources(namespace)) => {
+		(swagger20::SchemaKind::Ty(swagger20::Type::CustomResourceSubresources(namespace)), true) => {
 			let namespace_parts =
 				&["io", "k8s", "apiextensions_apiserver", "pkg", "apis", "apiextensions", namespace];
 			let namespace_parts =
@@ -1303,31 +1307,33 @@ fn get_rust_type(
 			Ok(result.into())
 		},
 
-		swagger20::SchemaKind::Ty(swagger20::Type::IntOrString) => Err("nothing should be trying to refer to IntOrString".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::IntOrString), true) => Err("nothing should be trying to refer to IntOrString".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrArray(_)) |
-		swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrBool(_)) |
-		swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrStringArray(_)) => Err("JSON schema types not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::Patch) => Err("Patch type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::WatchEvent(_)) => Err("WatchEvent type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrArray(_)), true) |
+		(swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrBool(_)), true) |
+		(swagger20::SchemaKind::Ty(swagger20::Type::JSONSchemaPropsOrStringArray(_)), true) => Err("JSON schema types not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::Patch), _) => Err("Patch type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::WatchEvent(_)), _) => Err("WatchEvent type not supported".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::ListDef { .. }) => Err("ListDef type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ListRef { items }) =>
-			Ok(format!("{}List<{}>", local, get_rust_type(items, map_namespace)?).into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ListDef { .. }), _) => Err("ListDef type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ListRef { items }), _) =>
+			Ok(format!("{}List<{}>", local, get_rust_type(items, true, map_namespace)?).into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::CreateOptional(_)) => Err("CreateOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::DeleteOptional(_)) => Err("DeleteOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ListOptional(_)) => Err("ListOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::PatchOptional(_)) => Err("PatchOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ReplaceOptional(_)) => Err("ReplaceOptional type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::WatchOptional(_)) => Err("WatchOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::CreateOptional(_)), _) => Err("CreateOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::DeleteOptional(_)), _) => Err("DeleteOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ListOptional(_)), _) => Err("ListOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::PatchOptional(_)), _) => Err("PatchOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ReplaceOptional(_)), _) => Err("ReplaceOptional type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::WatchOptional(_)), _) => Err("WatchOptional type not supported".into()),
 
-		swagger20::SchemaKind::Ty(swagger20::Type::CreateResponse) => Err("CreateResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::DeleteResponse) => Err("DeleteResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ListResponse) => Err("ListResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::PatchResponse) => Err("PatchResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::ReplaceResponse) => Err("ReplaceResponse type not supported".into()),
-		swagger20::SchemaKind::Ty(swagger20::Type::WatchResponse) => Err("WatchResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::CreateResponse), _) => Err("CreateResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::DeleteResponse), _) => Err("DeleteResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ListResponse), _) => Err("ListResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::PatchResponse), _) => Err("PatchResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::ReplaceResponse), _) => Err("ReplaceResponse type not supported".into()),
+		(swagger20::SchemaKind::Ty(swagger20::Type::WatchResponse), _) => Err("WatchResponse type not supported".into()),
+
+		(schema_kind, false) => Ok(format!("Option<{}>", get_rust_type(schema_kind, true, map_namespace)?).into()),
 	}
 }
 
@@ -1389,7 +1395,7 @@ pub fn write_operation(
 			}
 			previous_parameters.insert(parameter_name.clone());
 
-			let parameter_type = match get_rust_borrow_type(&parameter.schema.kind, map_namespace) {
+			let parameter_type = match get_rust_borrow_type(&parameter.schema.kind, true, map_namespace) {
 				Ok(parameter_type) => parameter_type,
 				Err(err) => return Err(err),
 			};
@@ -1738,7 +1744,7 @@ pub fn write_operation(
 				false
 			};
 		if is_patch {
-			let patch_type = get_rust_type(&parameter.schema.kind, map_namespace)?;
+			let patch_type = get_rust_type(&parameter.schema.kind, true, map_namespace)?;
 			writeln!(out, "{}    let __request = __request.header(http::header::CONTENT_TYPE, http::header::HeaderValue::from_static(match {} {{", indent, parameter_name)?;
 			writeln!(out, r#"{}        {}::Json(_) => "application/json-patch+json","#, indent, patch_type)?;
 			writeln!(out, r#"{}        {}::Merge(_) => "application/merge-patch+json","#, indent, patch_type)?;
@@ -1866,7 +1872,7 @@ pub fn write_operation(
 			let operation_responses = operation_responses?;
 
 			for &(_, variant_name, schema) in &operation_responses {
-				writeln!(out, "    {}({}),", variant_name, get_rust_type(&schema.kind, map_namespace)?)?;
+				writeln!(out, "    {}({}),", variant_name, get_rust_type(&schema.kind, true, map_namespace)?)?;
 			}
 
 			writeln!(out, "    Other(Result<Option<serde_json::Value>, serde_json::Error>),")?;
